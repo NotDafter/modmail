@@ -22,7 +22,6 @@ from core.models import DMDisabled, DummyMessage, getLogger
 from core.time import human_timedelta
 from core.utils import (
     is_image_url,
-    days,
     parse_channel_topic,
     match_title,
     match_user_id,
@@ -75,7 +74,7 @@ class Thread:
     async def wait_until_ready(self) -> None:
         """Blocks execution until the thread is fully set up."""
         # timeout after 30 seconds
-        task = asyncio.create_task(asyncio.wait_for(self._ready_event.wait(), timeout=25))
+        task = self.bot.loop.create_task(asyncio.wait_for(self._ready_event.wait(), timeout=25))
         self.wait_tasks.append(task)
         try:
             await task
@@ -196,7 +195,6 @@ class Thread:
             log_url = log_count = None
             # ensure core functionality still works
 
-        await channel.edit(topic=f"User ID: {recipient.id}")
         self.ready = True
 
         if creator is not None and creator != recipient:
@@ -230,7 +228,7 @@ class Thread:
             else:
                 footer = self.bot.config["thread_creation_footer"]
 
-            embed.set_footer(text=footer, icon_url=self.bot.guild.icon.url)
+            embed.set_footer(text=footer, icon_url=self.bot.get_guild_icon(guild=self.bot.modmail_guild))
             embed.title = self.bot.config["thread_creation_title"]
 
             if creator is None or creator == recipient:
@@ -323,10 +321,10 @@ class Thread:
 
             role_names = separator.join(roles)
 
-        created = str((time - user.created_at).days)
         user_info = []
         if self.bot.config["thread_show_account_age"]:
-            user_info.append(f" was created {days(created)}")
+            created = discord.utils.format_dt(user.created_at, "R")
+            user_info.append(f" was created {created}")
 
         embed = discord.Embed(color=color, description=user.mention, timestamp=time)
 
@@ -338,10 +336,9 @@ class Thread:
         if member is not None:
             embed.set_author(name=str(user), icon_url=member.display_avatar.url, url=log_url)
 
-            joined = str((time - member.joined_at).days)
-            # embed.add_field(name='Joined', value=joined + days(joined))
             if self.bot.config["thread_show_join_age"]:
-                user_info.append(f"joined {days(joined)}")
+                joined = discord.utils.format_dt(member.joined_at, "R")
+                user_info.append(f"joined {joined}")
 
             if member.nick:
                 embed.add_field(name="Nickname", value=member.nick, inline=True)
@@ -367,7 +364,8 @@ class Thread:
 
         return embed
 
-    def _close_after(self, closer, silent, delete_channel, message):
+    async def _close_after(self, after, closer, silent, delete_channel, message):
+        await asyncio.sleep(after)
         return self.bot.loop.create_task(self._close(closer, silent, delete_channel, message, True))
 
     async def close(
@@ -401,7 +399,7 @@ class Thread:
             self.bot.config["closures"][str(self.id)] = items
             await self.bot.config.update()
 
-            task = self.bot.loop.call_later(after, self._close_after, closer, silent, delete_channel, message)
+            task = asyncio.create_task(self._close_after(after, closer, silent, delete_channel, message))
 
             if auto_close:
                 self.auto_close_task = task
@@ -523,7 +521,7 @@ class Thread:
 
         embed.description = message
         footer = self.bot.config["thread_close_footer"]
-        embed.set_footer(text=footer, icon_url=self.bot.guild.icon.url)
+        embed.set_footer(text=footer, icon_url=self.bot.get_guild_icon(guild=self.bot.guild))
 
         if not silent:
             for user in self.recipients:
@@ -570,7 +568,7 @@ class Thread:
         seconds = timeout.total_seconds()
         # seconds = 20  # Uncomment to debug with just 20 seconds
         reset_time = discord.utils.utcnow() + timedelta(seconds=seconds)
-        human_time = human_timedelta(dt=reset_time, spec="manual")
+        human_time = discord.utils.format_dt(reset_time)
 
         if self.bot.config.get("thread_auto_close_silently"):
             return await self.close(closer=self.bot.user, silent=True, after=int(seconds), auto_close=True)
@@ -959,7 +957,7 @@ class Thread:
                     name = tag
                 avatar_url = self.bot.config["anon_avatar_url"]
                 if avatar_url is None:
-                    avatar_url = self.bot.guild.icon.url
+                    avatar_url = self.bot.get_guild_icon(guild=self.bot.guild)
                 embed.set_author(
                     name=name,
                     icon_url=avatar_url,
@@ -1133,13 +1131,13 @@ class Thread:
             logger.info("Sending a message to %s when DM disabled is set.", self.recipient)
 
         try:
-            await destination.trigger_typing()
+            await destination.typing()
         except discord.NotFound:
             logger.warning("Channel not found.")
             raise
 
         if not from_mod and not note:
-            mentions = self.get_notifications()
+            mentions = await self.get_notifications()
         else:
             mentions = None
 
@@ -1152,7 +1150,7 @@ class Thread:
                     additional_images = []
 
                 if embed.footer.text:
-                    plain_message = f"**({embed.footer.text}) "
+                    plain_message = f"**{embed.footer.text} "
                 else:
                     plain_message = "**"
                 plain_message += f"{embed.author.name}:** {embed.description}"
@@ -1176,7 +1174,7 @@ class Thread:
 
         return msg
 
-    def get_notifications(self) -> str:
+    async def get_notifications(self) -> str:
         key = str(self.id)
 
         mentions = []
